@@ -300,7 +300,19 @@ if __name__ == "__main__":
             "Set API_ID, API_HASH, and TELEGRAM_BOT_TOKEN environment variables"
         )
     logger.info("Bot starting (hybrid: Bot API <50MB, MTProto >50MB)")
-    app.start()
+
+    from pyrogram.errors import FloodWait
+    import time as _time
+
+    while True:
+        try:
+            app.start()
+            break
+        except FloodWait as e:
+            wait = e.value
+            logger.warning("FloodWait: waiting %d seconds before retry...", wait)
+            _time.sleep(wait + 5)
+
     asyncio.get_event_loop().create_task(_cleanup_loop())
     from pyrogram import idle
     idle()
