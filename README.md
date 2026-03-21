@@ -50,9 +50,22 @@ pip install -r requirements.txt
 python bot.py
 ```
 
+## Cookies (for Instagram / age-restricted content)
+
+Instagram requires login. To make it work:
+
+1. Install a browser extension like [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+2. Log into Instagram in your browser
+3. Export cookies as `cookies.txt` (Netscape format)
+4. Base64-encode it: `base64 -w0 cookies.txt`
+5. Set the result as `COOKIES_BASE64` env var in Railway
+
+This also helps with age-restricted YouTube videos and any other site that needs login.
+
 ## Environment variables
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Token from BotFather |
 | `API_ID` | Yes | App ID from my.telegram.org |
 | `API_HASH` | Yes | App hash from my.telegram.org |
+| `COOKIES_BASE64` | No | Base64-encoded cookies.txt for Instagram etc. |

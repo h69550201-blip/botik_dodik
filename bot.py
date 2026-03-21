@@ -6,7 +6,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ChatAction
 
-from downloader import extract_urls, download_video, cleanup, URL_PATTERN
+from downloader import extract_urls, download_video, cleanup, detect_platform, URL_PATTERN
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -86,6 +86,11 @@ async def handle_message(_client: Client, message: Message):
 
         path = None
         try:
+            platform = detect_platform(url)
+            if platform == "tiktok" and "/photo/" in url:
+                await status.edit_text("\u274c This is a TikTok photo post, not a video.")
+                continue
+
             await _client.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
 
             info = await download_video(url)
@@ -124,9 +129,16 @@ async def handle_message(_client: Client, message: Message):
             await status.edit_text(f"\u274c {e}")
         except Exception as e:
             logger.exception("Failed to download %s", url)
-            await status.edit_text(
-                f"\u274c Failed to download video.\n`{type(e).__name__}: {e}`"
-            )
+            err = str(e)
+            if "login" in err.lower() or "cookie" in err.lower():
+                msg = "\u274c This content requires login. Ask the bot admin to set up cookies."
+            elif "Unsupported URL" in err:
+                msg = "\u274c This link type is not supported (might be a photo or story)."
+            elif "format" in err.lower() and "not available" in err.lower():
+                msg = "\u274c No downloadable video format found for this link."
+            else:
+                msg = f"\u274c Failed to download video.\n`{type(e).__name__}: {e}`"
+            await status.edit_text(msg)
         finally:
             if path:
                 cleanup(path)

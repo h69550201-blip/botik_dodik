@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import base64
 import logging
 import asyncio
 from pathlib import Path
@@ -12,7 +13,9 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = Path("/tmp/botik_downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB (Pyrogram MTProto limit)
+COOKIES_FILE = Path("/tmp/cookies.txt")
+
+TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024
 
 PLATFORM_PATTERNS = {
     "tiktok": re.compile(
@@ -36,6 +39,21 @@ URL_PATTERN = re.compile(
 )
 
 
+def setup_cookies():
+    raw = os.environ.get("COOKIES_BASE64", "")
+    if raw:
+        COOKIES_FILE.write_bytes(base64.b64decode(raw))
+        logger.info("Cookies file written from COOKIES_BASE64")
+        return
+    txt = os.environ.get("COOKIES_TXT", "")
+    if txt:
+        COOKIES_FILE.write_text(txt)
+        logger.info("Cookies file written from COOKIES_TXT")
+
+
+setup_cookies()
+
+
 def extract_urls(text: str) -> list[str]:
     return URL_PATTERN.findall(text)
 
@@ -48,9 +66,10 @@ def detect_platform(url: str) -> str | None:
 
 
 def _ydl_opts(out_path: str) -> dict:
-    return {
+    opts = {
         "outtmpl": out_path,
         "format": "bv*+ba/b",
+        "format_sort": ["res", "ext:mp4:m4a:webm", "codec:h264"],
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
@@ -62,7 +81,7 @@ def _ydl_opts(out_path: str) -> dict:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/131.0.0.0 Safari/537.36"
             ),
         },
         "postprocessors": [
@@ -72,6 +91,9 @@ def _ydl_opts(out_path: str) -> dict:
             }
         ],
     }
+    if COOKIES_FILE.exists():
+        opts["cookiefile"] = str(COOKIES_FILE)
+    return opts
 
 
 async def download_video(url: str) -> dict:
