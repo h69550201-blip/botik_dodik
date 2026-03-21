@@ -133,12 +133,15 @@ async def handle_message(_client: Client, message: Message):
         except Exception as e:
             logger.exception("Failed to download %s", url)
             err = str(e)
-            if "login" in err.lower() or "cookie" in err.lower():
-                msg = "\u274c This content requires login. Ask the bot admin to set up cookies."
+            platform = detect_platform(url)
+            if platform == "instagram" and ("login" in err.lower() or "cookie" in err.lower()):
+                msg = "\u274c Instagram requires login. Ask the bot admin to set up cookies."
             elif "Unsupported URL" in err:
                 msg = "\u274c This link type is not supported (might be a photo or story)."
             elif "format" in err.lower() and "not available" in err.lower():
                 msg = "\u274c No downloadable video format found for this link."
+            elif "Sign in" in err or "confirm your age" in err:
+                msg = "\u274c This video is age-restricted and requires login."
             else:
                 msg = f"\u274c Failed to download video.\n`{type(e).__name__}: {e}`"
             await status.edit_text(msg)

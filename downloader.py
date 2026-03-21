@@ -65,7 +65,7 @@ def detect_platform(url: str) -> str | None:
     return None
 
 
-def _ydl_opts(out_path: str) -> dict:
+def _ydl_opts(out_path: str, platform: str = None) -> dict:
     opts = {
         "outtmpl": out_path,
         "format": "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
@@ -91,7 +91,7 @@ def _ydl_opts(out_path: str) -> dict:
             }
         ],
     }
-    if COOKIES_FILE.exists():
+    if COOKIES_FILE.exists() and platform in ("instagram", None):
         opts["cookiefile"] = str(COOKIES_FILE)
     return opts
 
@@ -104,7 +104,7 @@ async def download_video(url: str) -> dict:
     platform = detect_platform(url) or "unknown"
     logger.info("Downloading from %s: %s", platform, url)
 
-    opts = _ydl_opts(out_path)
+    opts = _ydl_opts(out_path, platform)
 
     loop = asyncio.get_event_loop()
     info = await loop.run_in_executor(None, _sync_download, url, opts)
