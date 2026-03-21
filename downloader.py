@@ -50,12 +50,7 @@ def detect_platform(url: str) -> str | None:
 def _ydl_opts(out_path: str) -> dict:
     return {
         "outtmpl": out_path,
-        "format": (
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
-            "/bestvideo+bestaudio"
-            "/best[ext=mp4]"
-            "/best"
-        ),
+        "format": "bv*+ba/b",
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
