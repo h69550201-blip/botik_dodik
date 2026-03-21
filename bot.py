@@ -1,16 +1,12 @@
 import os
 import logging
+import time
 
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    CommandHandler,
-    filters,
-)
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from pyrogram.enums import ChatAction
 
-from downloader import extract_urls, download_video, cleanup
+from downloader import extract_urls, download_video, cleanup, URL_PATTERN
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,56 +22,101 @@ PLATFORM_EMOJI = {
     "unknown": "\U0001f3ac",
 }
 
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+app = Client(
+    "botik_dodik",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir="/tmp",
+)
+
+
+def _progress_callback(status_msg):
+    last_edit = {"t": 0}
+
+    async def _progress(current, total):
+        now = time.time()
+        if now - last_edit["t"] < 3:
+            return
+        last_edit["t"] = now
+        pct = current * 100 / total
+        bar_filled = int(pct // 5)
+        bar = "\u2588" * bar_filled + "\u2591" * (20 - bar_filled)
+        mb_done = current / 1024 / 1024
+        mb_total = total / 1024 / 1024
+        try:
+            await status_msg.edit_text(
+                f"\u2b06\ufe0f Uploading\u2026\n"
+                f"`{bar}` {pct:.0f}%\n"
+                f"{mb_done:.1f} / {mb_total:.1f} MB"
+            )
+        except Exception:
+            pass
+
+    return _progress
+
+
+@app.on_message(filters.command("start"))
+async def start(_client: Client, message: Message):
+    await message.reply_text(
         "Hey! Send me a link from TikTok, YouTube, Instagram, or X/Twitter "
-        "and I'll download the video for you."
+        "and I\u2019ll download the video for you.\n\n"
+        "Works in groups too \u2014 just drop a link. Supports up to **2 GB** uploads."
     )
 
 
-async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
+@app.on_message(filters.regex(URL_PATTERN))
+async def handle_message(_client: Client, message: Message):
+    if not message.text:
         return
 
-    urls = extract_urls(update.message.text)
+    urls = extract_urls(message.text)
     if not urls:
         return
 
     for url in urls[:3]:
-        status = await update.message.reply_text(
+        status = await message.reply_text(
             "\u2b07\ufe0f Downloading\u2026",
-            reply_to_message_id=update.message.message_id,
+            quote=True,
         )
 
         path = None
         try:
-            result = download_video(url)
-            info = await result
+            await _client.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+
+            info = await download_video(url)
             path = info["path"]
 
             emoji = PLATFORM_EMOJI.get(info["platform"], "\U0001f3ac")
             caption_parts = []
             if info["title"]:
                 caption_parts.append(info["title"])
+            size_mb = info["size"] / 1024 / 1024
+            if size_mb >= 1024:
+                size_str = f"{size_mb / 1024:.2f} GB"
+            else:
+                size_str = f"{size_mb:.1f} MB"
             caption_parts.append(
-                f"{emoji} {info['platform'].capitalize()} "
-                f"| {info['size'] / 1024 / 1024:.1f} MB"
+                f"{emoji} {info['platform'].capitalize()} | {size_str}"
             )
             caption = "\n".join(caption_parts)
             if len(caption) > 1024:
                 caption = caption[:1021] + "\u2026"
 
-            with open(path, "rb") as video_file:
-                await update.message.reply_video(
-                    video=video_file,
-                    caption=caption,
-                    reply_to_message_id=update.message.message_id,
-                    read_timeout=120,
-                    write_timeout=120,
-                    connect_timeout=30,
-                    supports_streaming=True,
-                )
+            await status.edit_text("\u2b06\ufe0f Uploading\u2026")
+
+            await message.reply_video(
+                video=path,
+                caption=caption,
+                quote=True,
+                supports_streaming=True,
+                duration=int(info["duration"]) if info["duration"] else None,
+                progress=_progress_callback(status),
+            )
 
             await status.delete()
 
@@ -84,36 +125,17 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as e:
             logger.exception("Failed to download %s", url)
             await status.edit_text(
-                f"\u274c Failed to download video.\n<code>{type(e).__name__}: {e}</code>",
-                parse_mode="HTML",
+                f"\u274c Failed to download video.\n`{type(e).__name__}: {e}`"
             )
         finally:
             if path:
                 cleanup(path)
 
 
-def main() -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Set TELEGRAM_BOT_TOKEN environment variable")
-
-    app = (
-        ApplicationBuilder()
-        .token(token)
-        .read_timeout(120)
-        .write_timeout(120)
-        .connect_timeout(30)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-
-    logger.info("Bot starting (polling mode)")
-    app.run_polling(drop_pending_updates=True)
-
-
 if __name__ == "__main__":
-    main()
+    if not all([API_ID, API_HASH, BOT_TOKEN]):
+        raise RuntimeError(
+            "Set API_ID, API_HASH, and TELEGRAM_BOT_TOKEN environment variables"
+        )
+    logger.info("Bot starting (Pyrogram MTProto, up to 2 GB uploads)")
+    app.run()

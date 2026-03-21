@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_DIR = Path("/tmp/botik_downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-TELEGRAM_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB (Pyrogram MTProto limit)
 
 PLATFORM_PATTERNS = {
     "tiktok": re.compile(
@@ -51,10 +51,9 @@ def _ydl_opts(out_path: str) -> dict:
     return {
         "outtmpl": out_path,
         "format": (
-            "bestvideo[filesize<50M][ext=mp4]+bestaudio[ext=m4a]"
-            "/bestvideo[filesize<50M]+bestaudio"
-            "/best[filesize<50M][ext=mp4]"
-            "/best[filesize<50M]"
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/bestvideo+bestaudio"
+            "/best[ext=mp4]"
             "/best"
         ),
         "merge_output_format": "mp4",
@@ -110,7 +109,7 @@ async def download_video(url: str) -> dict:
         os.remove(final_path)
         raise ValueError(
             f"Video too large ({size / 1024 / 1024:.1f} MB). "
-            f"Telegram limit is 50 MB."
+            f"Telegram limit is 2 GB."
         )
 
     title = info.get("title", "")[:200] if info else ""
