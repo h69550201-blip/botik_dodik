@@ -27,11 +27,6 @@ PLATFORM_EMOJI = {
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 BOT_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-
-def escape_md(text: str) -> str:
-    import re
-    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
-
 processing = set()
 http_session: aiohttp.ClientSession = None
 
@@ -58,7 +53,6 @@ async def bot_api_send_video(chat_id, file_path, caption, reply_to, duration=Non
     data.add_field("video", open(file_path, "rb"), filename="video.mp4", content_type="video/mp4")
     if caption:
         data.add_field("caption", caption)
-        data.add_field("parse_mode", "MarkdownV2")
     if reply_to:
         data.add_field("reply_to_message_id", str(reply_to))
     if duration:
@@ -79,7 +73,6 @@ async def bot_api_send_audio(chat_id, file_path, caption, reply_to):
     data.add_field("audio", open(file_path, "rb"), filename="audio.mp3", content_type="audio/mpeg")
     if caption:
         data.add_field("caption", caption)
-        data.add_field("parse_mode", "MarkdownV2")
     if reply_to:
         data.add_field("reply_to_message_id", str(reply_to))
     return await bot_api_call("sendAudio", data, timeout=60)
@@ -91,7 +84,6 @@ async def bot_api_send_photo(chat_id, file_path, caption, reply_to):
     data.add_field("photo", open(file_path, "rb"), filename="photo.jpg", content_type="image/jpeg")
     if caption:
         data.add_field("caption", caption)
-        data.add_field("parse_mode", "MarkdownV2")
     if reply_to:
         data.add_field("reply_to_message_id", str(reply_to))
     return await bot_api_call("sendPhoto", data, timeout=60)
@@ -109,7 +101,6 @@ async def bot_api_send_media_group(chat_id, photo_paths, caption, reply_to):
         entry = {"type": "photo", "media": f"attach://{field_name}"}
         if i == 0 and caption:
             entry["caption"] = caption
-            entry["parse_mode"] = "Markdown"
         media_list.append(entry)
     data.add_field("media", json.dumps(media_list))
     return await bot_api_call("sendMediaGroup", data)
@@ -140,6 +131,11 @@ async def bot_api_delete_message(chat_id, message_id):
         return await bot_api_call("deleteMessage", data, timeout=30)
     except Exception:
         pass
+
+
+async def delete_later(chat_id, message_id, delay=10):
+    await asyncio.sleep(delay)
+    await bot_api_delete_message(chat_id, message_id)
 
 
 async def handle_update(update: dict):
@@ -187,8 +183,7 @@ async def handle_update(update: dict):
             if error:
                 if status_id:
                     await bot_api_edit_message(chat_id, status_id, error)
-                    asyncio.get_event_loop().call_later(
-                        10, lambda sid=status_id: asyncio.ensure_future(bot_api_delete_message(chat_id, sid)))
+                    asyncio.create_task(delete_later(chat_id, status_id, 10))
                 continue
 
             try:
@@ -196,14 +191,14 @@ async def handle_update(update: dict):
                     if status_id:
                         await bot_api_edit_message(chat_id, status_id, "\u2b06\ufe0f Uploading\u2026")
 
-                    caption = f"{emoji} {escape_md(media.title)}"
+                    caption = f"{emoji} {media.title}"
                     if len(media.photo_paths) == 1:
                         await bot_api_send_photo(chat_id, media.photo_paths[0], caption, msg_id)
                     else:
                         await bot_api_send_media_group(chat_id, media.photo_paths, caption, msg_id)
 
                     if media.audio_path:
-                        await bot_api_send_audio(chat_id, media.audio_path, f"\U0001f3b5 {escape_md(media.title)}", msg_id)
+                        await bot_api_send_audio(chat_id, media.audio_path, f"\U0001f3b5 {media.title}", msg_id)
 
                     if status_id:
                         await bot_api_delete_message(chat_id, status_id)
@@ -213,7 +208,7 @@ async def handle_update(update: dict):
                         await bot_api_edit_message(chat_id, status_id, "\u2b06\ufe0f Uploading\u2026")
 
                     size_mb = media.file_size / 1024 / 1024
-                    caption = f"{emoji} {escape_md(media.title)}\n{escape_md(f'{size_mb:.1f} MB')}"
+                    caption = f"{emoji} {media.title}\n{size_mb:.1f} MB"
                     if len(caption) > 1024:
                         caption = caption[:1021] + "\u2026"
 
@@ -227,7 +222,11 @@ async def handle_update(update: dict):
             except Exception as e:
                 logger.error("Upload error: %s", e)
                 if status_id:
-                    await bot_api_edit_message(chat_id, status_id, f"\u274c Upload failed: {e}")
+                    try:
+                        await bot_api_edit_message(chat_id, status_id, f"\u274c Upload failed")
+                    except Exception:
+                        pass
+                    asyncio.create_task(delete_later(chat_id, status_id, 10))
             finally:
                 if media.file_path:
                     cleanup_media(media.file_path)
