@@ -1,12 +1,16 @@
 import os
+import asyncio
 import logging
 import time
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InputMediaPhoto
 from pyrogram.enums import ChatAction
 
-from downloader import extract_urls, download_video, cleanup, detect_platform, URL_PATTERN
+from downloader import (
+    extract_urls, download_media, cleanup_media, cleanup_old_files,
+    get_platform, URL_PATTERN,
+)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -18,7 +22,7 @@ PLATFORM_EMOJI = {
     "tiktok": "\U0001f3b5",
     "youtube": "\u25b6\ufe0f",
     "instagram": "\U0001f4f7",
-    "twitter": "\U0001f426",
+    "twitter": "\U0001d54f",
     "unknown": "\U0001f3ac",
 }
 
@@ -33,6 +37,8 @@ app = Client(
     bot_token=BOT_TOKEN,
     workdir="/tmp",
 )
+
+processing = set()
 
 
 def _progress_callback(status_msg):
@@ -63,9 +69,13 @@ def _progress_callback(status_msg):
 @app.on_message(filters.command("start"))
 async def start(_client: Client, message: Message):
     await message.reply_text(
-        "Hey! Send me a link from TikTok, YouTube, Instagram, or X/Twitter "
-        "and I\u2019ll download the video for you.\n\n"
-        "Works in groups too \u2014 just drop a link. Supports up to **2 GB** uploads."
+        "\U0001f3ac **Media Downloader**\n\n"
+        "Send a link from:\n"
+        "\u2022 TikTok (videos + photos)\n"
+        "\u2022 YouTube\n"
+        "\u2022 X.com / Twitter (videos + photos)\n"
+        "\u2022 Instagram (videos + photos)\n\n"
+        "Works in groups \u2014 just drop a link. Up to **2 GB** uploads."
     )
 
 
@@ -79,75 +89,94 @@ async def handle_message(_client: Client, message: Message):
         return
 
     for url in urls[:3]:
-        status = await message.reply_text(
-            "\u2b07\ufe0f Downloading\u2026",
-            quote=True,
-        )
+        url_hash = hash(url)
+        if url_hash in processing:
+            continue
+        processing.add(url_hash)
 
-        path = None
         try:
-            platform = detect_platform(url)
-            if platform == "tiktok" and "/photo/" in url:
-                await status.edit_text("\u274c This is a TikTok photo post, not a video.")
+            platform = get_platform(url)
+            emoji = PLATFORM_EMOJI.get(platform, "\U0001f3ac")
+
+            status = await message.reply_text(
+                f"{emoji} Downloading\u2026", quote=True)
+
+            media, error = await download_media(url)
+
+            if error:
+                await status.edit_text(error)
+                asyncio.get_event_loop().call_later(
+                    10, lambda m=status: asyncio.ensure_future(_safe_delete(m)))
                 continue
 
-            await _client.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+            await status.edit_text("\u2b06\ufe0f Uploading\u2026")
 
-            info = await download_video(url)
-            path = info["path"]
+            try:
+                if media.media_type == "photos" and media.photo_paths:
+                    await _client.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
 
-            emoji = PLATFORM_EMOJI.get(info["platform"], "\U0001f3ac")
-            caption_parts = []
-            if info["title"]:
-                caption_parts.append(info["title"])
-            size_mb = info["size"] / 1024 / 1024
-            if size_mb >= 1024:
-                size_str = f"{size_mb / 1024:.2f} GB"
-            else:
-                size_str = f"{size_mb:.1f} MB"
-            caption_parts.append(
-                f"{emoji} {info['platform'].capitalize()} | {size_str}"
-            )
-            caption = "\n".join(caption_parts)
-            if len(caption) > 1024:
-                caption = caption[:1021] + "\u2026"
+                    if len(media.photo_paths) == 1:
+                        await message.reply_photo(
+                            photo=media.photo_paths[0],
+                            caption=f"{emoji} **{media.title}**",
+                            quote=True,
+                        )
+                    else:
+                        group = []
+                        for i, path in enumerate(media.photo_paths[:10]):
+                            group.append(InputMediaPhoto(
+                                media=path,
+                                caption=f"{emoji} **{media.title}**" if i == 0 else "",
+                            ))
+                        await message.reply_media_group(media=group, quote=True)
+                    await status.delete()
 
-            is_large = info["size"] > 100 * 1024 * 1024
+                else:
+                    await _client.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
 
-            if is_large:
-                await status.edit_text("\u2b06\ufe0f Uploading\u2026")
+                    is_large = media.file_size > 100 * 1024 * 1024
 
-            await message.reply_video(
-                video=path,
-                caption=caption,
-                quote=True,
-                supports_streaming=True,
-                duration=int(info["duration"]) if info["duration"] else None,
-                progress=_progress_callback(status) if is_large else None,
-            )
+                    size_mb = media.file_size / 1024 / 1024
+                    size_str = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
+                    caption = f"{emoji} **{media.title}**\n{size_str}"
+                    if len(caption) > 1024:
+                        caption = caption[:1021] + "\u2026"
 
-            await status.delete()
+                    await message.reply_video(
+                        video=media.file_path,
+                        caption=caption,
+                        quote=True,
+                        supports_streaming=True,
+                        duration=media.duration or None,
+                        width=media.width or None,
+                        height=media.height or None,
+                        thumb=media.thumbnail_path,
+                        progress=_progress_callback(status) if is_large else None,
+                    )
+                    await status.delete()
 
-        except ValueError as e:
-            await status.edit_text(f"\u274c {e}")
-        except Exception as e:
-            logger.exception("Failed to download %s", url)
-            err = str(e)
-            platform = detect_platform(url)
-            if platform == "instagram" and ("login" in err.lower() or "cookie" in err.lower()):
-                msg = "\u274c Instagram requires login. Ask the bot admin to set up cookies."
-            elif "Unsupported URL" in err:
-                msg = "\u274c This link type is not supported (might be a photo or story)."
-            elif "format" in err.lower() and "not available" in err.lower():
-                msg = "\u274c No downloadable video format found for this link."
-            elif "Sign in" in err or "confirm your age" in err:
-                msg = "\u274c This video is age-restricted and requires login."
-            else:
-                msg = f"\u274c Failed to download video.\n`{type(e).__name__}: {e}`"
-            await status.edit_text(msg)
+            except Exception as e:
+                logger.error("Upload error: %s", e)
+                await status.edit_text("\u274c Upload failed")
+            finally:
+                if media.file_path:
+                    cleanup_media(media.file_path)
+
         finally:
-            if path:
-                cleanup(path)
+            processing.discard(url_hash)
+
+
+async def _safe_delete(msg: Message):
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def _cleanup_loop():
+    while True:
+        await asyncio.sleep(300)
+        await cleanup_old_files()
 
 
 if __name__ == "__main__":
@@ -156,4 +185,8 @@ if __name__ == "__main__":
             "Set API_ID, API_HASH, and TELEGRAM_BOT_TOKEN environment variables"
         )
     logger.info("Bot starting (Pyrogram MTProto, up to 2 GB uploads)")
-    app.run()
+    app.start()
+    asyncio.get_event_loop().create_task(_cleanup_loop())
+    from pyrogram import idle
+    idle()
+    app.stop()
