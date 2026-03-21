@@ -370,6 +370,84 @@ async def _gallery_dl_download(url: str, platform: str, output_dir: Path) -> Opt
         return None
 
 
+async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://www.tikwm.com/api/",
+                params={"url": url, "hd": 1},
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+
+            if data.get("code") != 0:
+                return None
+
+            vdata = data.get("data", {})
+            title = (vdata.get("title") or "TikTok")[:100]
+
+            images = vdata.get("images")
+            if images:
+                photo_paths = []
+                audio_url = vdata.get("music")
+                for i, img_url in enumerate(images[:10]):
+                    try:
+                        async with session.get(img_url) as img_resp:
+                            if img_resp.status != 200:
+                                continue
+                            content = await img_resp.read()
+                            photo_path = output_dir / f"photo_{i:03d}.jpg"
+                            photo_path.write_bytes(content)
+                            photo_paths.append(str(photo_path))
+                    except Exception:
+                        continue
+                if not photo_paths:
+                    return None
+                audio_path = None
+                if audio_url:
+                    audio_path = await _download_audio(audio_url, output_dir)
+                return MediaInfo(
+                    media_type="photos", platform="tiktok", title=title,
+                    file_path=photo_paths[0],
+                    file_size=sum(Path(p).stat().st_size for p in photo_paths),
+                    photo_paths=photo_paths, audio_path=audio_path,
+                ), None
+
+            video_url = vdata.get("hdplay") or vdata.get("play")
+            if not video_url:
+                return None
+
+            video_path = output_dir / "video.mp4"
+            async with session.get(video_url) as vid_resp:
+                if vid_resp.status != 200:
+                    return None
+                with open(video_path, "wb") as f:
+                    async for chunk in vid_resp.content.iter_chunked(65536):
+                        f.write(chunk)
+
+            if not video_path.exists() or video_path.stat().st_size < 1024:
+                return None
+
+            duration, width, height = await get_video_metadata(str(video_path))
+            thumb_path = str(output_dir / "thumb.jpg")
+            await generate_thumbnail(str(video_path), thumb_path)
+
+            return MediaInfo(
+                media_type="video", platform="tiktok", title=title,
+                file_path=str(video_path), duration=duration,
+                file_size=video_path.stat().st_size,
+                width=width, height=height,
+                thumbnail_path=thumb_path if Path(thumb_path).exists() else None,
+            ), None
+
+    except Exception as e:
+        logger.error("TikTok API error: %s", e)
+        return None
+
+
 def _parse_error(error_msg: str, platform: str) -> str:
     e = error_msg.lower()
     if "private" in e:
@@ -410,6 +488,15 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
     thumb_path = str(output_dir / "thumb.jpg")
 
     if platform != "youtube":
+        if platform == "tiktok":
+            try:
+                api_result = await _tiktok_api_download(url, output_dir)
+                if api_result:
+                    return api_result
+                output_dir.mkdir(exist_ok=True)
+            except Exception:
+                output_dir.mkdir(exist_ok=True)
+
         if platform == "tiktok" and "/photo/" in url:
             try:
                 result = await _gallery_dl_download(url, platform, output_dir)
@@ -472,6 +559,12 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
                 gallery_result = await _gallery_dl_download(url, platform, output_dir)
                 if gallery_result:
                     return gallery_result
+
+            if platform == "tiktok":
+                output_dir.mkdir(exist_ok=True)
+                api_result = await _tiktok_api_download(url, output_dir)
+                if api_result:
+                    return api_result
 
             shutil.rmtree(output_dir, ignore_errors=True)
             return None, _parse_error(error_msg, platform)
