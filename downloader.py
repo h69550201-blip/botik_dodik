@@ -70,6 +70,7 @@ class MediaInfo:
     height: int = 0
     thumbnail_path: Optional[str] = None
     photo_paths: list = field(default_factory=list)
+    audio_path: Optional[str] = None
 
 
 def setup_cookies():
@@ -210,6 +211,7 @@ async def probe_content(url: str, platform: str) -> Optional[dict]:
         if not entries:
             return None
         image_urls = []
+        audio_url = None
         has_video = False
         for entry in entries:
             formats = entry.get("formats") or []
@@ -227,22 +229,86 @@ async def probe_content(url: str, platform: str) -> Optional[dict]:
                 if f_ext in ("jpg", "jpeg", "png", "webp") and f_url:
                     image_urls.append(f_url)
                     break
+            if not audio_url:
+                for f in formats:
+                    acodec = f.get("acodec") or "none"
+                    vcodec = f.get("vcodec") or "none"
+                    if acodec != "none" and vcodec == "none" and f.get("url"):
+                        audio_url = f["url"]
+                        break
+        if not audio_url:
+            for entry in entries:
+                for f in (entry.get("formats") or []):
+                    acodec = f.get("acodec") or "none"
+                    if acodec != "none" and f.get("url"):
+                        audio_url = f["url"]
+                        break
+                if audio_url:
+                    break
         if has_video:
             return {"type": "video", "title": title}
         if image_urls:
-            return {"type": "photos", "urls": list(dict.fromkeys(image_urls)), "title": title}
+            return {"type": "photos", "urls": list(dict.fromkeys(image_urls)), "title": title, "audio_url": audio_url}
         return None
     except Exception as e:
         logger.error("Probe error: %s", e)
         return None
 
 
-async def _download_photos(image_urls: list, title: str, platform: str, output_dir: Path) -> Tuple[Optional[MediaInfo], Optional[str]]:
+async def _download_audio(audio_url: str, output_dir: Path) -> Optional[str]:
+    if not audio_url:
+        return None
+    audio_path = output_dir / "audio.mp3"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            async with session.get(audio_url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                content = await resp.read()
+                if len(content) < 1024:
+                    return None
+                raw_path = output_dir / "audio_raw"
+                raw_path.write_bytes(content)
+        cmd = ["ffmpeg", "-y", "-i", str(raw_path), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(audio_path)]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await asyncio.wait_for(proc.communicate(), timeout=30)
+        raw_path.unlink(missing_ok=True)
+        if audio_path.exists() and audio_path.stat().st_size > 0:
+            return str(audio_path)
+        return None
+    except Exception as e:
+        logger.error("Audio download error: %s", e)
+        return None
+
+
+async def _download_photos(image_urls: list, title: str, platform: str, output_dir: Path, audio_url: str = None) -> Tuple[Optional[MediaInfo], Optional[str]]:
     if not image_urls:
         return None, "No photos found"
     photo_paths = []
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     timeout = aiohttp.ClientTimeout(total=30)
+
+    photo_coro = _download_photos_only(image_urls, output_dir, headers, timeout)
+    audio_coro = _download_audio(audio_url, output_dir)
+    photo_paths, audio_path = await asyncio.gather(photo_coro, audio_coro)
+
+    if not photo_paths:
+        return None, "Failed to download photos"
+    return MediaInfo(
+        media_type="photos", platform=platform,
+        title=title[:100] if title else "Photos",
+        file_path=photo_paths[0],
+        file_size=sum(Path(p).stat().st_size for p in photo_paths),
+        photo_paths=photo_paths,
+        audio_path=audio_path,
+    ), None
+
+
+async def _download_photos_only(image_urls, output_dir, headers, timeout):
+    photo_paths = []
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         for i, url in enumerate(image_urls[:10]):
             if not url:
@@ -261,15 +327,7 @@ async def _download_photos(image_urls: list, title: str, platform: str, output_d
                     photo_paths.append(str(photo_path))
             except Exception as e:
                 logger.error("Photo download error: %s", e)
-    if not photo_paths:
-        return None, "Failed to download photos"
-    return MediaInfo(
-        media_type="photos", platform=platform,
-        title=title[:100] if title else "Photos",
-        file_path=photo_paths[0],
-        file_size=sum(Path(p).stat().st_size for p in photo_paths),
-        photo_paths=photo_paths,
-    ), None
+    return photo_paths
 
 
 async def _gallery_dl_download(url: str, platform: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
@@ -365,7 +423,8 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
             content = await probe_content(url, platform)
             if content and content.get("type") == "photos" and content.get("urls"):
                 result = await _download_photos(
-                    content["urls"], content.get("title", "Photos"), platform, output_dir)
+                    content["urls"], content.get("title", "Photos"), platform, output_dir,
+                    audio_url=content.get("audio_url"))
                 if result[0] is not None:
                     return result
                 output_dir.mkdir(exist_ok=True)

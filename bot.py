@@ -81,6 +81,24 @@ async def bot_api_send_video(chat_id, file_path, caption, reply_to, duration=Non
         return result
 
 
+async def bot_api_send_audio(chat_id, file_path, caption, reply_to):
+    data = aiohttp.FormData()
+    data.add_field("chat_id", str(chat_id))
+    data.add_field("audio", open(file_path, "rb"), filename="audio.mp3", content_type="audio/mpeg")
+    if caption:
+        data.add_field("caption", caption)
+        data.add_field("parse_mode", "Markdown")
+    if reply_to:
+        data.add_field("reply_to_message_id", str(reply_to))
+
+    session = await get_session()
+    async with session.post(f"{BOT_API_URL}/sendAudio", data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+        result = await resp.json()
+        if not result.get("ok"):
+            raise Exception(result.get("description", "Bot API sendAudio failed"))
+        return result
+
+
 async def bot_api_send_photo(chat_id, file_path, caption, reply_to):
     data = aiohttp.FormData()
     data.add_field("chat_id", str(chat_id))
@@ -206,6 +224,12 @@ async def handle_message(_client: Client, message: Message):
                         await bot_api_send_media_group(
                             message.chat.id, media.photo_paths,
                             f"{emoji} **{media.title}**", message.id)
+
+                    if media.audio_path:
+                        await bot_api_send_audio(
+                            message.chat.id, media.audio_path,
+                            f"\U0001f3b5 {media.title}", message.id)
+
                     await status.delete()
 
                 elif media.file_size < BOT_API_LIMIT:
