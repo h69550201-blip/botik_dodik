@@ -47,6 +47,13 @@ processing = set()
 http_session: aiohttp.ClientSession = None
 
 
+async def get_session() -> aiohttp.ClientSession:
+    global http_session
+    if http_session is None or http_session.closed:
+        http_session = aiohttp.ClientSession()
+    return http_session
+
+
 async def bot_api_send_video(chat_id, file_path, caption, reply_to, duration=None, width=None, height=None, thumb_path=None):
     data = aiohttp.FormData()
     data.add_field("chat_id", str(chat_id))
@@ -66,7 +73,8 @@ async def bot_api_send_video(chat_id, file_path, caption, reply_to, duration=Non
     if thumb_path and os.path.exists(thumb_path):
         data.add_field("thumbnail", open(thumb_path, "rb"), filename="thumb.jpg", content_type="image/jpeg")
 
-    async with http_session.post(f"{BOT_API_URL}/sendVideo", data=data, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+    session = await get_session()
+    async with session.post(f"{BOT_API_URL}/sendVideo", data=data, timeout=aiohttp.ClientTimeout(total=120)) as resp:
         result = await resp.json()
         if not result.get("ok"):
             raise Exception(result.get("description", "Bot API sendVideo failed"))
@@ -83,7 +91,8 @@ async def bot_api_send_photo(chat_id, file_path, caption, reply_to):
     if reply_to:
         data.add_field("reply_to_message_id", str(reply_to))
 
-    async with http_session.post(f"{BOT_API_URL}/sendPhoto", data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+    session = await get_session()
+    async with session.post(f"{BOT_API_URL}/sendPhoto", data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
         result = await resp.json()
         if not result.get("ok"):
             raise Exception(result.get("description", "Bot API sendPhoto failed"))
@@ -109,7 +118,8 @@ async def bot_api_send_media_group(chat_id, photo_paths, caption, reply_to):
     import json
     data.add_field("media", json.dumps(media_list))
 
-    async with http_session.post(f"{BOT_API_URL}/sendMediaGroup", data=data, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+    session = await get_session()
+    async with session.post(f"{BOT_API_URL}/sendMediaGroup", data=data, timeout=aiohttp.ClientTimeout(total=120)) as resp:
         result = await resp.json()
         if not result.get("ok"):
             raise Exception(result.get("description", "Bot API sendMediaGroup failed"))
@@ -266,7 +276,6 @@ if __name__ == "__main__":
             "Set API_ID, API_HASH, and TELEGRAM_BOT_TOKEN environment variables"
         )
     logger.info("Bot starting (hybrid: Bot API <50MB, MTProto >50MB)")
-    http_session = aiohttp.ClientSession()
     app.start()
     asyncio.get_event_loop().create_task(_cleanup_loop())
     from pyrogram import idle
