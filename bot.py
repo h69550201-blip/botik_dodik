@@ -40,7 +40,7 @@ def _progress_callback(status_msg):
 
     async def _progress(current, total):
         now = time.time()
-        if now - last_edit["t"] < 3:
+        if now - last_edit["t"] < 5:
             return
         last_edit["t"] = now
         pct = current * 100 / total
@@ -112,7 +112,10 @@ async def handle_message(_client: Client, message: Message):
             if len(caption) > 1024:
                 caption = caption[:1021] + "\u2026"
 
-            await status.edit_text("\u2b06\ufe0f Uploading\u2026")
+            is_large = info["size"] > 100 * 1024 * 1024
+
+            if is_large:
+                await status.edit_text("\u2b06\ufe0f Uploading\u2026")
 
             await message.reply_video(
                 video=path,
@@ -120,7 +123,7 @@ async def handle_message(_client: Client, message: Message):
                 quote=True,
                 supports_streaming=True,
                 duration=int(info["duration"]) if info["duration"] else None,
-                progress=_progress_callback(status),
+                progress=_progress_callback(status) if is_large else None,
             )
 
             await status.delete()

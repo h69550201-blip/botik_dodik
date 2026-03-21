@@ -68,8 +68,8 @@ def detect_platform(url: str) -> str | None:
 def _ydl_opts(out_path: str) -> dict:
     opts = {
         "outtmpl": out_path,
-        "format": "bv*+ba/b",
-        "format_sort": ["res", "ext:mp4:m4a:webm", "codec:h264"],
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+        "format_sort": ["ext:mp4:m4a", "codec:h264:aac", "res"],
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
@@ -86,7 +86,7 @@ def _ydl_opts(out_path: str) -> dict:
         },
         "postprocessors": [
             {
-                "key": "FFmpegVideoConvertor",
+                "key": "FFmpegVideoRemuxer",
                 "preferedformat": "mp4",
             }
         ],
