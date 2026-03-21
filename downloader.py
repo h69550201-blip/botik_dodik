@@ -448,6 +448,86 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
         return None
 
 
+async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
+    clients = ["android", "ios", "mweb"]
+    for client in clients:
+        try:
+            temp_path = str(output_dir / f"retry.%(ext)s")
+            cmd = [
+                "yt-dlp", "--no-playlist", "--no-warnings",
+                "-o", temp_path, "--socket-timeout", "30",
+                "-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+                "--merge-output-format", "mp4",
+                "--extractor-args", f"youtube:player_client={client}",
+                url,
+            ]
+            cookie_path = get_cookie_path("youtube")
+            if cookie_path:
+                cmd.insert(-1, "--cookies")
+                cmd.insert(-1, str(cookie_path))
+
+            logger.info("YouTube retry with client=%s: %s", client, url)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            if proc.returncode != 0:
+                continue
+
+            downloaded = list(output_dir.glob("retry.*"))
+            if not downloaded:
+                continue
+
+            temp_file = downloaded[0]
+            final_path = str(output_dir / "video.mp4")
+            if temp_file.suffix.lower() != ".mp4":
+                rp = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", str(temp_file), "-c", "copy", final_path,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                await asyncio.wait_for(rp.communicate(), timeout=60)
+                if Path(final_path).exists() and Path(final_path).stat().st_size > 0:
+                    temp_file.unlink()
+                else:
+                    shutil.move(str(temp_file), final_path)
+            else:
+                shutil.move(str(temp_file), final_path)
+
+            if not Path(final_path).exists():
+                continue
+
+            file_size = Path(final_path).stat().st_size
+            if file_size > TELEGRAM_MAX_SIZE:
+                Path(final_path).unlink()
+                continue
+
+            duration, width, height = await get_video_metadata(final_path)
+            thumb_path = str(output_dir / "thumb.jpg")
+            await generate_thumbnail(final_path, thumb_path)
+
+            title = "Video"
+            try:
+                tp = await asyncio.create_subprocess_exec(
+                    "yt-dlp", "--get-title", "--no-warnings", url,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                tout, _ = await asyncio.wait_for(tp.communicate(), timeout=10)
+                title = tout.decode().strip()[:100] if tout else "Video"
+            except Exception:
+                pass
+
+            return MediaInfo(
+                media_type="video", platform="youtube", file_path=final_path,
+                title=title, duration=duration, file_size=file_size,
+                width=width, height=height,
+                thumbnail_path=thumb_path if Path(thumb_path).exists() else None,
+            ), None
+
+        except Exception as e:
+            logger.error("YouTube retry (%s) error: %s", client, e)
+            continue
+
+    return None
+
+
 def _parse_error(error_msg: str, platform: str) -> str:
     e = error_msg.lower()
     if "private" in e:
@@ -565,6 +645,12 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
                 api_result = await _tiktok_api_download(url, output_dir)
                 if api_result:
                     return api_result
+
+            if platform == "youtube":
+                output_dir.mkdir(exist_ok=True)
+                yt_result = await _youtube_retry_download(url, output_dir)
+                if yt_result:
+                    return yt_result
 
             shutil.rmtree(output_dir, ignore_errors=True)
             return None, _parse_error(error_msg, platform)
