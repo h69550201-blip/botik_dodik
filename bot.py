@@ -29,9 +29,8 @@ BOT_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 def escape_md(text: str) -> str:
-    for ch in ('_', '*', '`', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'):
-        text = text.replace(ch, f'\\{ch}')
-    return text
+    import re
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
 
 processing = set()
 http_session: aiohttp.ClientSession = None
@@ -214,7 +213,7 @@ async def handle_update(update: dict):
                         await bot_api_edit_message(chat_id, status_id, "\u2b06\ufe0f Uploading\u2026")
 
                     size_mb = media.file_size / 1024 / 1024
-                    caption = f"{emoji} {escape_md(media.title)}\n{size_mb:.1f} MB"
+                    caption = f"{emoji} {escape_md(media.title)}\n{escape_md(f'{size_mb:.1f} MB')}"
                     if len(caption) > 1024:
                         caption = caption[:1021] + "\u2026"
 
