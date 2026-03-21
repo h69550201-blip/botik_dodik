@@ -19,7 +19,7 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 COOKIES_DIR = Path("/tmp/cookies")
 COOKIES_DIR.mkdir(exist_ok=True)
 
-TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024
+TELEGRAM_MAX_SIZE = 50 * 1024 * 1024
 
 PLATFORM_COOKIES = {
     "tiktok": COOKIES_DIR / "tiktok_cookies.txt",

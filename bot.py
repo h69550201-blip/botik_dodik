@@ -2,13 +2,12 @@ import os
 import json
 import asyncio
 import logging
-import time
 
 import aiohttp
 
 from downloader import (
     extract_urls, download_media, cleanup_media, cleanup_old_files,
-    get_platform, URL_PATTERN,
+    get_platform,
 )
 
 logging.basicConfig(
@@ -25,18 +24,11 @@ PLATFORM_EMOJI = {
     "unknown": "\U0001f3ac",
 }
 
-BOT_API_LIMIT = 50 * 1024 * 1024
-
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-
 BOT_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 processing = set()
 http_session: aiohttp.ClientSession = None
-pyrogram_app = None
-pyrogram_ready = False
 
 
 async def get_session() -> aiohttp.ClientSession:
@@ -145,56 +137,6 @@ async def bot_api_delete_message(chat_id, message_id):
         pass
 
 
-async def pyrogram_send_large_video(chat_id, file_path, caption, reply_to, duration=None, width=None, height=None, thumb=None):
-    global pyrogram_app, pyrogram_ready
-    if not pyrogram_ready or not pyrogram_app:
-        raise Exception("Large file upload unavailable (Pyrogram not connected). File must be under 50 MB.")
-
-    await pyrogram_app.send_video(
-        chat_id=chat_id,
-        video=file_path,
-        caption=caption,
-        reply_to_message_id=reply_to,
-        supports_streaming=True,
-        duration=duration,
-        width=width,
-        height=height,
-        thumb=thumb,
-    )
-
-
-async def start_pyrogram_background():
-    global pyrogram_app, pyrogram_ready
-    if not all([API_ID, API_HASH]):
-        logger.info("API_ID/API_HASH not set, Pyrogram disabled (50 MB limit)")
-        return
-
-    from pyrogram import Client
-    from pyrogram.errors import FloodWait
-
-    pyrogram_app = Client(
-        "botik_dodik",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        workdir="/tmp",
-    )
-
-    while True:
-        try:
-            await pyrogram_app.start()
-            pyrogram_ready = True
-            logger.info("Pyrogram connected (2 GB uploads enabled)")
-            return
-        except FloodWait as e:
-            wait = e.value
-            logger.warning("Pyrogram FloodWait: waiting %d seconds...", wait)
-            await asyncio.sleep(wait + 5)
-        except Exception as e:
-            logger.error("Pyrogram start failed: %s, retrying in 60s...", e)
-            await asyncio.sleep(60)
-
-
 async def handle_update(update: dict):
     msg = update.get("message", {})
     text = msg.get("text", "")
@@ -241,7 +183,7 @@ async def handle_update(update: dict):
                 if status_id:
                     await bot_api_edit_message(chat_id, status_id, error)
                     asyncio.get_event_loop().call_later(
-                        10, lambda: asyncio.ensure_future(bot_api_delete_message(chat_id, status_id)))
+                        10, lambda sid=status_id: asyncio.ensure_future(bot_api_delete_message(chat_id, sid)))
                 continue
 
             try:
@@ -260,7 +202,7 @@ async def handle_update(update: dict):
                     if status_id:
                         await bot_api_delete_message(chat_id, status_id)
 
-                elif media.file_size < BOT_API_LIMIT:
+                else:
                     if status_id:
                         await bot_api_edit_message(chat_id, status_id, "\u2b06\ufe0f Uploading\u2026")
 
@@ -273,23 +215,6 @@ async def handle_update(update: dict):
                         chat_id, media.file_path, caption, msg_id,
                         duration=media.duration, width=media.width, height=media.height,
                         thumb_path=media.thumbnail_path)
-                    if status_id:
-                        await bot_api_delete_message(chat_id, status_id)
-
-                else:
-                    if status_id:
-                        await bot_api_edit_message(chat_id, status_id, "\u2b06\ufe0f Uploading large file\u2026")
-
-                    size_mb = media.file_size / 1024 / 1024
-                    size_str = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
-                    caption = f"{emoji} **{media.title}**\n{size_str}"
-                    if len(caption) > 1024:
-                        caption = caption[:1021] + "\u2026"
-
-                    await pyrogram_send_large_video(
-                        chat_id, media.file_path, caption, msg_id,
-                        duration=media.duration, width=media.width, height=media.height,
-                        thumb=media.thumbnail_path)
                     if status_id:
                         await bot_api_delete_message(chat_id, status_id)
 
@@ -342,9 +267,8 @@ async def main():
     if not BOT_TOKEN:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN environment variable")
 
-    logger.info("Bot starting (Bot API polling + Pyrogram for large files)")
+    logger.info("Bot starting (Bot API only, 50 MB limit)")
 
-    asyncio.create_task(start_pyrogram_background())
     asyncio.create_task(cleanup_loop())
     await polling_loop()
 
