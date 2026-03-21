@@ -544,7 +544,7 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
 
 
 async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
-    clients = ["android", "ios", "mweb"]
+    clients = ["web", "ios", "mweb"]
     for client in clients:
         try:
             temp_path = str(output_dir / f"retry.%(ext)s")
@@ -567,6 +567,8 @@ async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
 
             if proc.returncode != 0:
+                err = (stderr.decode() if stderr else "")[:200]
+                logger.warning("YouTube retry client=%s failed: %s", client, err)
                 continue
 
             downloaded = list(output_dir.glob("retry.*"))
@@ -719,6 +721,7 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
     elif platform == "youtube":
         cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"])
         cmd.extend(["--merge-output-format", "mp4"])
+        cmd.extend(["--extractor-args", "youtube:player_client=android,default"])
     else:
         cmd.extend(["-f", "bv*+ba/b"])
 
