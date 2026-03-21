@@ -188,7 +188,9 @@ async def _twitter_fxtwitter(username: str, tweet_id: str) -> Optional[dict]:
         videos = media.get("videos") or []
         photos = media.get("photos") or []
         if videos:
-            return {"type": "video", "title": title}
+            video_url = videos[0].get("url", "")
+            thumb_url = videos[0].get("thumbnail_url", "")
+            return {"type": "video", "title": title, "video_url": video_url, "thumbnail_url": thumb_url}
         if photos:
             image_urls = [p["url"] for p in photos if p.get("url")]
             if image_urls:
@@ -258,6 +260,7 @@ async def _twitter_graphql(tweet_id: str) -> Optional[dict]:
             media_list = legacy.get("entities", {}).get("media", [])
 
         photos = []
+        best_video_url = ""
         has_video = False
         for m in media_list:
             mtype = m.get("type", "")
@@ -267,9 +270,15 @@ async def _twitter_graphql(tweet_id: str) -> Optional[dict]:
                     photos.append(f"{media_url}?format=jpg&name=large")
             elif mtype in ("video", "animated_gif"):
                 has_video = True
+                video_info = m.get("video_info", {})
+                variants = video_info.get("variants", [])
+                mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+                if mp4s:
+                    best = max(mp4s, key=lambda v: v.get("bitrate", 0))
+                    best_video_url = best.get("url", "")
 
         if has_video:
-            return {"type": "video", "title": text or "Tweet"}
+            return {"type": "video", "title": text or "Tweet", "video_url": best_video_url}
         if photos:
             return {"type": "photos", "urls": photos, "title": text or "Tweet"}
         return None
@@ -423,6 +432,41 @@ async def _download_photos_only(image_urls, output_dir, headers, timeout):
             except Exception as e:
                 logger.error("Photo download error: %s", e)
     return photo_paths
+
+
+async def _twitter_direct_download(video_url: str, title: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
+    if not video_url:
+        return None
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        timeout = aiohttp.ClientTimeout(total=60)
+        video_path = output_dir / "video.mp4"
+
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            async with session.get(video_url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                with open(video_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        f.write(chunk)
+
+        if not video_path.exists() or video_path.stat().st_size < 1024:
+            return None
+
+        duration, width, height = await get_video_metadata(str(video_path))
+        thumb_path = str(output_dir / "thumb.jpg")
+        await generate_thumbnail(str(video_path), thumb_path)
+
+        return MediaInfo(
+            media_type="video", platform="twitter", title=title,
+            file_path=str(video_path), duration=duration,
+            file_size=video_path.stat().st_size,
+            width=width, height=height,
+            thumbnail_path=thumb_path if Path(thumb_path).exists() else None,
+        ), None
+    except Exception as e:
+        logger.error("Twitter direct download error: %s", e)
+        return None
 
 
 async def _gallery_dl_download(url: str, platform: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
@@ -669,7 +713,22 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
     final_path = str(output_dir / "video.mp4")
     thumb_path = str(output_dir / "thumb.jpg")
 
-    if platform != "youtube":
+    if platform == "twitter":
+        try:
+            content = await _twitter_get_media(url)
+            if content:
+                if content.get("type") == "video" and content.get("video_url"):
+                    result = await _twitter_direct_download(content["video_url"], content.get("title", "Tweet"), output_dir)
+                    if result:
+                        return result
+                elif content.get("type") == "photos" and content.get("urls"):
+                    result = await _download_photos(content["urls"], content.get("title", "Tweet"), platform, output_dir)
+                    if result[0] is not None:
+                        return result
+        except Exception:
+            output_dir.mkdir(exist_ok=True)
+
+    if platform != "youtube" and platform != "twitter":
         if platform == "tiktok":
             try:
                 api_result = await _tiktok_api_download(url, output_dir)
