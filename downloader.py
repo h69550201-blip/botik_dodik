@@ -151,11 +151,27 @@ async def generate_thumbnail(video_path: str, output_path: str) -> bool:
         return False
 
 
+TWITTER_BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+
+
 async def _twitter_get_media(url: str) -> Optional[dict]:
     match = re.search(r"(?:twitter\.com|x\.com)/(\w+)/status/(\d+)", url)
     if not match:
         return None
     username, tweet_id = match.group(1), match.group(2)
+
+    result = await _twitter_fxtwitter(username, tweet_id)
+    if result:
+        return result
+
+    result = await _twitter_graphql(tweet_id)
+    if result:
+        return result
+
+    return None
+
+
+async def _twitter_fxtwitter(username: str, tweet_id: str) -> Optional[dict]:
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -180,6 +196,85 @@ async def _twitter_get_media(url: str) -> Optional[dict]:
         return None
     except Exception as e:
         logger.error("fxtwitter error: %s", e)
+        return None
+
+
+async def _twitter_graphql(tweet_id: str) -> Optional[dict]:
+    try:
+        headers = {
+            "Authorization": f"Bearer {TWITTER_BEARER}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "x-twitter-active-user": "yes",
+            "x-twitter-client-language": "en",
+        }
+
+        cookie_path = get_cookie_path("twitter")
+        cookies = {}
+        if cookie_path:
+            for line in cookie_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    cookies[parts[5]] = parts[6]
+            if "ct0" in cookies:
+                headers["x-csrf-token"] = cookies["ct0"]
+            if cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            if "Cookie" not in headers:
+                async with session.post("https://api.x.com/1.1/guest/activate.json", headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        headers["x-guest-token"] = data.get("guest_token", "")
+
+            variables = json.dumps({"tweetId": tweet_id, "withCommunity": False, "includePromotedContent": False, "withVoice": False})
+            features = json.dumps({
+                "creator_subscriptions_tweet_preview_api_enabled": True,
+                "responsive_web_graphql_exclude_directive_enabled": True,
+                "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+                "responsive_web_graphql_timeline_navigation_enabled": True,
+                "responsive_web_enhance_cards_enabled": False,
+            })
+            api_url = f"https://x.com/i/api/graphql/2ICDjqPd81tulZcYrtpTuQ/TweetResultByRestId?variables={variables}&features={features}"
+            async with session.get(api_url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+
+        result = data.get("data", {}).get("tweetResult", {}).get("result", {})
+        if not result:
+            return None
+        if result.get("__typename") == "TweetWithVisibilityResults":
+            result = result.get("tweet", {})
+        legacy = result.get("legacy", {})
+        text = (legacy.get("full_text") or "")[:100]
+
+        media_list = legacy.get("extended_entities", {}).get("media", [])
+        if not media_list:
+            media_list = legacy.get("entities", {}).get("media", [])
+
+        photos = []
+        has_video = False
+        for m in media_list:
+            mtype = m.get("type", "")
+            if mtype == "photo":
+                media_url = m.get("media_url_https", "")
+                if media_url:
+                    photos.append(f"{media_url}?format=jpg&name=large")
+            elif mtype in ("video", "animated_gif"):
+                has_video = True
+
+        if has_video:
+            return {"type": "video", "title": text or "Tweet"}
+        if photos:
+            return {"type": "photos", "urls": photos, "title": text or "Tweet"}
+        return None
+    except Exception as e:
+        logger.error("Twitter GraphQL error: %s", e)
         return None
 
 
@@ -536,7 +631,12 @@ def _parse_error(error_msg: str, platform: str) -> str:
         return "\u274c Content is unavailable"
     if "removed" in e or "deleted" in e:
         return "\u274c Content was deleted"
-    if "age" in e or "sign in" in e or "login" in e:
+    if "age" in e or "sign in" in e or "login" in e or "no video could be found" in e:
+        if platform == "twitter":
+            has_cookies = get_cookie_path("twitter") is not None
+            if has_cookies:
+                return "\u274c X/Twitter couldn't load this tweet \u2014 cookies may be expired. Re-export and set COOKIES_TWITTER_BASE64"
+            return "\u274c X/Twitter requires login for this content. Set COOKIES_TWITTER_BASE64 env var in Railway"
         return f"\u274c Login required \u2014 use /setcookies {platform}"
     if "copyright" in e:
         return "\u274c Blocked due to copyright"
