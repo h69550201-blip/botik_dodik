@@ -119,6 +119,10 @@ def get_cookie_path(platform: str) -> Optional[Path]:
     return None
 
 
+UNSUPPORTED_CODECS = {"bvc2", "bvc1", "hevc", "h265", "hev1"}
+RECODE_TO_H264 = {"bvc2", "bvc1"}
+
+
 async def get_video_metadata(video_path: str) -> Tuple[int, int, int]:
     try:
         cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
@@ -137,6 +141,69 @@ async def get_video_metadata(video_path: str) -> Tuple[int, int, int]:
         return duration, width, height
     except Exception:
         return 0, 0, 0
+
+
+async def detect_video_codec(video_path: str) -> Tuple[str, bool]:
+    """Returns (codec_tag_string, needs_reencoding)"""
+    try:
+        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
+               "-show_streams", video_path]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        data = json.loads(stdout.decode())
+
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                codec_tag = stream.get("codec_tag_string", "").lower()
+                codec_name = stream.get("codec_name", "").lower()
+
+                if codec_tag in RECODE_TO_H264 or codec_name in RECODE_TO_H264:
+                    return codec_tag, True
+                if codec_tag in UNSUPPORTED_CODECS or codec_name in UNSUPPORTED_CODECS:
+                    return codec_tag, True
+                return codec_tag, False
+        return "", False
+    except Exception:
+        return "", False
+
+
+async def reencode_video(input_path: str, output_path: str) -> bool:
+    """Re-encode video to H.264 for compatibility"""
+    try:
+        # Check if codec is decodable - bvc2 and similar proprietary codecs cannot be decoded
+        codec, _ = await detect_video_codec(input_path)
+        if codec in {"bvc2", "bvc1", "byted"}:
+            logger.error("Cannot reencode %s: codec '%s' requires proprietary decoder not available in ffmpeg", input_path, codec)
+            return False
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p",
+            output_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+
+        if proc.returncode != 0:
+            logger.error("ffmpeg reencode error: %s", stderr.decode()[:500] if stderr else "Unknown")
+            return False
+
+        return Path(output_path).exists() and Path(output_path).stat().st_size > 0
+    except asyncio.TimeoutError:
+        logger.error("ffmpeg reencode timeout")
+        return False
+    except Exception as e:
+        logger.error("ffmpeg reencode error: %s", e)
+        return False
 
 
 async def generate_thumbnail(video_path: str, output_path: str) -> bool:
@@ -498,10 +565,21 @@ async def _gallery_dl_download(url: str, platform: str, output_dir: Path) -> Opt
                 photo_paths=photo_paths,
             ), None
         if videos:
+            video_path = Path(videos[0])
+            codec, needs_reencode = await detect_video_codec(str(video_path))
+            if needs_reencode:
+                logger.info("gallery-dl: Unsupported codec '%s', re-encoding: %s", codec, video_path)
+                reencoded_path = output_dir / "video_reencoded.mp4"
+                success = await reencode_video(str(video_path), str(reencoded_path))
+                if success:
+                    video_path.unlink()
+                    video_path = reencoded_path
+                else:
+                    logger.error("gallery-dl: Re-encoding failed")
             return MediaInfo(
                 media_type="video", platform=platform, title="Video",
-                file_path=videos[0],
-                file_size=Path(videos[0]).stat().st_size,
+                file_path=str(video_path),
+                file_size=video_path.stat().st_size,
             ), None
         return None
     except Exception as e:
@@ -569,6 +647,17 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
 
             if not video_path.exists() or video_path.stat().st_size < 1024:
                 return None
+
+            codec, needs_reencode = await detect_video_codec(str(video_path))
+            if needs_reencode:
+                logger.info("TikTok API: Unsupported codec '%s', re-encoding: %s", codec, video_path)
+                reencoded_path = output_dir / "video_reencoded.mp4"
+                success = await reencode_video(str(video_path), str(reencoded_path))
+                if success:
+                    video_path.unlink()
+                    video_path = reencoded_path
+                else:
+                    logger.error("TikTok API: Re-encoding failed")
 
             duration, width, height = await get_video_metadata(str(video_path))
             thumb_path = str(output_dir / "thumb.jpg")
@@ -766,17 +855,17 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
         cmd.extend(["--cookies", str(cookie_path)])
 
     if platform == "tiktok":
-        cmd.extend(["-f", "bestvideo*+bestaudio/best"])
+        cmd.extend(["-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=avc1]/bestvideo[ext=mp4]/best"])
         cmd.extend(["--add-header", "User-Agent:Mozilla/5.0"])
         cmd.extend(["--merge-output-format", "mp4"])
     elif platform == "twitter":
-        cmd.extend(["-f", "best[height<=720]/best[height<=480]/best"])
+        cmd.extend(["-f", "best[vcodec^=avc1][height<=720]/best[vcodec^=avc1]/best[height<=720]/best[height<=480]/best"])
         cmd.extend([
             "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "--extractor-args", "twitter:api=syndication",
         ])
     elif platform == "instagram":
-        cmd.extend(["-f", "best"])
+        cmd.extend(["-f", "best[vcodec^=avc1]/best"])
     elif platform == "youtube":
         cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"])
         cmd.extend(["--merge-output-format", "mp4"])
@@ -860,6 +949,33 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
         if file_size > TELEGRAM_MAX_SIZE:
             shutil.rmtree(output_dir, ignore_errors=True)
             return None, f"\u274c Too large ({file_size // 1024 // 1024} MB). Limit is 2 GB"
+
+        codec, needs_reencode = await detect_video_codec(final_path)
+        if needs_reencode:
+            logger.info("Unsupported codec '%s' detected, re-encoding to H.264: %s", codec, final_path)
+            reencoded_path = str(output_dir / "video_reencoded.mp4")
+            success = await reencode_video(final_path, reencoded_path)
+            if success:
+                Path(final_path).unlink()
+                shutil.move(reencoded_path, final_path)
+                file_size = Path(final_path).stat().st_size
+                logger.info("Re-encoding successful, new size: %d bytes", file_size)
+            elif codec in {"bvc2", "bvc1"}:
+                logger.error("Cannot decode proprietary codec '%s', trying alternative download method", codec)
+                Path(final_path).unlink()
+                # For TikTok, try API download which usually provides compatible formats
+                if platform == "tiktok":
+                    api_result = await _tiktok_api_download(url, output_dir)
+                    if api_result:
+                        return api_result
+                # Try gallery-dl for any platform
+                gallery_result = await _gallery_dl_download(url, platform, output_dir)
+                if gallery_result:
+                    return gallery_result
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return None, f"\u274c Video uses unsupported codec '{codec}'. Please try again or use a different URL."
+            else:
+                logger.error("Re-encoding failed for codec '%s', using original file", codec)
 
         duration, width, height = await get_video_metadata(final_path)
         await generate_thumbnail(final_path, thumb_path)
