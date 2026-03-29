@@ -861,12 +861,10 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
         cmd.extend(["--cookies", str(cookie_path)])
 
     if platform == "tiktok":
-        # Prioritize avc1 (H.264) codec, avoid bvc2/bytevc
-        cmd.extend(["-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=avc1]/best[vcodec^=avc1]/bestvideo[ext=mp4]/worst"])
+        # Only allow H.264 (avc1) codec, reject bvc2/bytevc entirely
+        cmd.extend(["-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=avc1]/best[vcodec^=avc1]"])
         cmd.extend(["--add-header", "User-Agent:Mozilla/5.0"])
         cmd.extend(["--merge-output-format", "mp4"])
-        # Add more logging to debug format selection
-        cmd.extend(["--print", "format:[yt-dlp] Selected format: %(format_id)s vcodec=%(vcodec)s"])
     elif platform == "twitter":
         cmd.extend(["-f", "best[vcodec^=avc1][height<=720]/best[vcodec^=avc1]/best[height<=720]/best[height<=480]/best"])
         cmd.extend([
@@ -960,6 +958,24 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
             return None, f"\u274c Too large ({file_size // 1024 // 1024} MB). Limit is 2 GB"
 
         codec, needs_reencode = await detect_video_codec(final_path)
+        # Reject bvc2/bytevc entirely - ffmpeg can't decode it
+        if codec in {"bvc2", "bvc1", "bytevc"}:
+            logger.error("yt-dlp returned bvc2/bytevc codec, rejecting and trying alternatives")
+            Path(final_path).unlink()
+            # Try TikTok API
+            if platform == "tiktok":
+                output_dir.mkdir(exist_ok=True)
+                api_result = await _tiktok_api_download(url, output_dir)
+                if api_result:
+                    return api_result
+            # Try gallery-dl
+            output_dir.mkdir(exist_ok=True)
+            gallery_result = await _gallery_dl_download(url, platform, output_dir)
+            if gallery_result:
+                return gallery_result
+            shutil.rmtree(output_dir, ignore_errors=True)
+            return None, f"\u274c Video uses unsupported codec '{codec}'. No compatible format available."
+
         if needs_reencode:
             logger.info("Unsupported codec '%s' detected, re-encoding to H.264: %s", codec, final_path)
             reencoded_path = str(output_dir / "video_reencoded.mp4")
@@ -969,20 +985,6 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
                 shutil.move(reencoded_path, final_path)
                 file_size = Path(final_path).stat().st_size
                 logger.info("Re-encoding successful, new size: %d bytes", file_size)
-            elif codec in {"bvc2", "bvc1"}:
-                logger.error("Cannot decode proprietary codec '%s', trying alternative download method", codec)
-                Path(final_path).unlink()
-                # For TikTok, try API download which usually provides compatible formats
-                if platform == "tiktok":
-                    api_result = await _tiktok_api_download(url, output_dir)
-                    if api_result:
-                        return api_result
-                # Try gallery-dl for any platform
-                gallery_result = await _gallery_dl_download(url, platform, output_dir)
-                if gallery_result:
-                    return gallery_result
-                shutil.rmtree(output_dir, ignore_errors=True)
-                return None, f"\u274c Video uses unsupported codec '{codec}'. Please try again or use a different URL."
             else:
                 logger.error("Re-encoding failed for codec '%s', using original file", codec)
 
