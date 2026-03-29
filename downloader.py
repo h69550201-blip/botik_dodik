@@ -633,7 +633,8 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
                     photo_paths=photo_paths, audio_path=audio_path,
                 ), None
 
-            video_url = vdata.get("hdplay") or vdata.get("play")
+            video_url = vdata.get("hdplay") or vdata.get("play") or vdata.get("wmplay")
+            logger.info("TikTok API video URL: %s", video_url[:100] if video_url else None)
             if not video_url:
                 return None
 
@@ -649,7 +650,12 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
                 return None
 
             codec, needs_reencode = await detect_video_codec(str(video_path))
+            logger.info("TikTok API downloaded video codec: %s, needs_reencode: %s", codec, needs_reencode)
             if needs_reencode:
+                if codec in {"bvc2", "bvc1"}:
+                    logger.error("TikTok API: Got bvc2 codec which cannot be decoded, rejecting")
+                    video_path.unlink()
+                    return None
                 logger.info("TikTok API: Unsupported codec '%s', re-encoding: %s", codec, video_path)
                 reencoded_path = output_dir / "video_reencoded.mp4"
                 success = await reencode_video(str(video_path), str(reencoded_path))
@@ -855,9 +861,12 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
         cmd.extend(["--cookies", str(cookie_path)])
 
     if platform == "tiktok":
-        cmd.extend(["-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=avc1]/bestvideo[ext=mp4]/best"])
+        # Prioritize avc1 (H.264) codec, avoid bvc2/bytevc
+        cmd.extend(["-f", "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec^=avc1]/best[vcodec^=avc1]/bestvideo[ext=mp4]/worst"])
         cmd.extend(["--add-header", "User-Agent:Mozilla/5.0"])
         cmd.extend(["--merge-output-format", "mp4"])
+        # Add more logging to debug format selection
+        cmd.extend(["--print", "format:[yt-dlp] Selected format: %(format_id)s vcodec=%(vcodec)s"])
     elif platform == "twitter":
         cmd.extend(["-f", "best[vcodec^=avc1][height<=720]/best[vcodec^=avc1]/best[height<=720]/best[height<=480]/best"])
         cmd.extend([
