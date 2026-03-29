@@ -103,7 +103,7 @@ def get_platform(url: str) -> Optional[str]:
     u = url.lower()
     if "tiktok.com" in u:
         return "tiktok"
-    if "youtube.com" in u or "youtu.be" in u:
+    if "youtube.com" in u or "youtu.be" in u or "music.youtube.com" in u:
         return "youtube"
     if "twitter.com" in u or "x.com" in u:
         return "twitter"
@@ -778,7 +778,12 @@ def _parse_error(error_msg: str, platform: str) -> str:
             if has_cookies:
                 return "\u274c X/Twitter couldn't load this tweet \u2014 cookies may be expired. Re-export and set COOKIES_TWITTER_BASE64"
             return "\u274c X/Twitter requires login for this content. Set COOKIES_TWITTER_BASE64 env var in Railway"
-        return f"\u274c Login required \u2014 use /setcookies {platform}"
+        if platform == "youtube":
+            has_cookies = get_cookie_path("youtube") is not None
+            if has_cookies:
+                return "\u274c YouTube requires login for this content \u2014 cookies may be expired. Re-export and set COOKIES_YOUTUBE_BASE64"
+            return "\u274c YouTube requires login for this content. Set COOKIES_YOUTUBE_BASE64 env var in Railway"
+        return f"\u274c Login required \u2014 set COOKIES_{platform.upper()}_BASE64 in Railway"
     if "copyright" in e:
         return "\u274c Blocked due to copyright"
     if "geo" in e or "country" in e or "region" in e:
