@@ -40,6 +40,7 @@ YOUTUBE_PATTERNS = [
     r"(https?://)?(www\.)?youtube\.com/shorts/[\w-]+",
     r"(https?://)?(www\.)?youtu\.be/[\w-]+",
     r"(https?://)?(www\.)?youtube\.com/watch\?v=[\w-]+",
+    r"(https?://)?music\.youtube\.com/watch\?v=[\w-]+",
 ]
 TWITTER_PATTERNS = [
     r"(https?://)?(www\.)?(twitter\.com|x\.com)/\w+/status/\d+",
@@ -52,7 +53,7 @@ INSTAGRAM_PATTERNS = [
 ]
 
 URL_PATTERN = re.compile(
-    r"https?://(?:www\.|vm\.|vt\.|m\.)?"
+    r"https?://(?:www\.|vm\.|vt\.|m\.|music\.)?"
     r"(?:tiktok\.com|youtube\.com|youtu\.be|instagram\.com|twitter\.com|x\.com)"
     r"/\S+"
 )
@@ -683,14 +684,14 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
 
 
 async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
-    clients = ["web", "ios", "mweb"]
+    clients = ["android_vr", "tv_embedded", "ios", "mweb"]
     for client in clients:
         try:
             temp_path = str(output_dir / f"retry.%(ext)s")
             cmd = [
                 "yt-dlp", "--no-playlist", "--no-warnings",
                 "-o", temp_path, "--socket-timeout", "30",
-                "-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+                "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best",
                 "--merge-output-format", "mp4",
                 "--extractor-args", f"youtube:player_client={client}",
                 url,
@@ -879,9 +880,14 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
     elif platform == "instagram":
         cmd.extend(["-f", "best[vcodec^=avc1]/best"])
     elif platform == "youtube":
-        cmd.extend(["-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"])
+        cmd.extend(["-f",
+            "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
+            "/bestvideo[height<=720]+bestaudio"
+            "/best[height<=720][ext=mp4]"
+            "/best[height<=720]"
+            "/best"])
         cmd.extend(["--merge-output-format", "mp4"])
-        cmd.extend(["--extractor-args", "youtube:player_client=android,default"])
+        cmd.extend(["--extractor-args", "youtube:player_client=web_creator,android,web;player_skip=webpage"])
     else:
         cmd.extend(["-f", "bv*+ba/b"])
 
