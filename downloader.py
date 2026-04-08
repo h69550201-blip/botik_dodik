@@ -7,6 +7,7 @@ import shutil
 import base64
 import logging
 import aiohttp
+import yt_dlp
 from pathlib import Path
 from typing import Optional, Tuple
 from dataclasses import dataclass, field
@@ -23,7 +24,6 @@ TELEGRAM_MAX_SIZE = 50 * 1024 * 1024
 
 PLATFORM_COOKIES = {
     "tiktok": COOKIES_DIR / "tiktok_cookies.txt",
-    "youtube": COOKIES_DIR / "youtube_cookies.txt",
     "twitter": COOKIES_DIR / "twitter_cookies.txt",
     "instagram": COOKIES_DIR / "instagram_cookies.txt",
 }
@@ -683,89 +683,112 @@ async def _tiktok_api_download(url: str, output_dir: Path) -> Optional[Tuple[Med
         return None
 
 
-async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[MediaInfo, None]]:
-    clients = ["android_vr", "tv_embedded", "ios", "mweb"]
-    for client in clients:
+_YT_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Mode": "navigate",
+}
+
+_YT_EXTRACTOR_ARGS = {
+    "youtube": {
+        "player_client": ["web_creator", "android", "web"],
+        "player_skip": ["webpage"],
+    }
+}
+
+
+def _yt_opts(out_path: str) -> dict:
+    return {
+        "format": (
+            "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
+            "/bestvideo[height<=720]+bestaudio"
+            "/best[height<=720][ext=mp4]"
+            "/best[height<=720]"
+            "/best"
+        ),
+        "outtmpl": out_path,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "noplaylist": True,
+        "http_headers": _YT_BROWSER_HEADERS,
+        "extractor_args": _YT_EXTRACTOR_ARGS,
+    }
+
+
+async def _youtube_download(url: str, output_dir: Path) -> Tuple[Optional[MediaInfo], Optional[str]]:
+    out_path = str(output_dir / "video.%(ext)s")
+
+    strategies = [_yt_opts(out_path)]
+    fb1 = _yt_opts(out_path)
+    fb1["extractor_args"] = {"youtube": {"player_client": ["android_vr"]}}
+    fb2 = _yt_opts(out_path)
+    fb2["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
+    strategies += [fb1, fb2]
+
+    info = None
+    last_error = None
+
+    def _try_download(opts):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=True)
+
+    for i, opts in enumerate(strategies):
         try:
-            temp_path = str(output_dir / f"retry.%(ext)s")
-            cmd = [
-                "yt-dlp", "--no-playlist", "--no-warnings",
-                "-o", temp_path, "--socket-timeout", "30",
-                "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best",
-                "--merge-output-format", "mp4",
-                "--extractor-args", f"youtube:player_client={client}",
-                "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "--add-header", "Accept-Language:en-US,en;q=0.9",
-                "--add-header", "Sec-Fetch-Mode:navigate",
-                url,
-            ]
-            cookie_path = get_cookie_path("youtube")
-            if cookie_path:
-                cmd.insert(-1, "--cookies")
-                cmd.insert(-1, str(cookie_path))
-
-            logger.info("YouTube retry with client=%s: %s", client, url)
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-
-            if proc.returncode != 0:
-                err = (stderr.decode() if stderr else "")[:200]
-                logger.warning("YouTube retry client=%s failed: %s", client, err)
-                continue
-
-            downloaded = list(output_dir.glob("retry.*"))
-            if not downloaded:
-                continue
-
-            temp_file = downloaded[0]
-            final_path = str(output_dir / "video.mp4")
-            if temp_file.suffix.lower() != ".mp4":
-                rp = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", str(temp_file), "-c", "copy", final_path,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                await asyncio.wait_for(rp.communicate(), timeout=60)
-                if Path(final_path).exists() and Path(final_path).stat().st_size > 0:
-                    temp_file.unlink()
-                else:
-                    shutil.move(str(temp_file), final_path)
-            else:
-                shutil.move(str(temp_file), final_path)
-
-            if not Path(final_path).exists():
-                continue
-
-            file_size = Path(final_path).stat().st_size
-            if file_size > TELEGRAM_MAX_SIZE:
-                Path(final_path).unlink()
-                continue
-
-            duration, width, height = await get_video_metadata(final_path)
-            thumb_path = str(output_dir / "thumb.jpg")
-            await generate_thumbnail(final_path, thumb_path)
-
-            title = "Video"
-            try:
-                tp = await asyncio.create_subprocess_exec(
-                    "yt-dlp", "--get-title", "--no-warnings", url,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                tout, _ = await asyncio.wait_for(tp.communicate(), timeout=10)
-                title = tout.decode().strip()[:100] if tout else "Video"
-            except Exception:
-                pass
-
-            return MediaInfo(
-                media_type="video", platform="youtube", file_path=final_path,
-                title=title, duration=duration, file_size=file_size,
-                width=width, height=height,
-                thumbnail_path=thumb_path if Path(thumb_path).exists() else None,
-            ), None
-
+            logger.info("YouTube strategy %d for: %s", i + 1, url)
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_try_download, opts), timeout=120)
+            last_error = None
+            break
         except Exception as e:
-            logger.error("YouTube retry (%s) error: %s", client, e)
-            continue
+            last_error = e
+            logger.warning("YouTube strategy %d failed: %s", i + 1, e)
+            for f in output_dir.glob("*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
-    return None
+    if last_error:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return None, "\u274c Download failed"
+
+    files = list(output_dir.glob("*"))
+    if not files:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return None, "\u274c No media found"
+
+    video_file = max(files, key=lambda f: f.stat().st_size)
+    file_size = video_file.stat().st_size
+
+    if file_size > TELEGRAM_MAX_SIZE:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        return None, f"\u274c Too large ({file_size // 1024 // 1024} MB). Limit is 50 MB"
+
+    final_path = str(output_dir / "video.mp4")
+    if str(video_file) != final_path:
+        shutil.move(str(video_file), final_path)
+
+    duration, width, height = await get_video_metadata(final_path)
+    thumb_path = str(output_dir / "thumb.jpg")
+    await generate_thumbnail(final_path, thumb_path)
+
+    title = (info or {}).get("title", "Video") or "Video"
+    title = title[:100]
+
+    return MediaInfo(
+        media_type="video", platform="youtube", file_path=final_path,
+        title=title, duration=duration, file_size=file_size,
+        width=width, height=height,
+        thumbnail_path=thumb_path if Path(thumb_path).exists() else None,
+    ), None
 
 
 def _parse_error(error_msg: str, platform: str) -> str:
@@ -783,10 +806,7 @@ def _parse_error(error_msg: str, platform: str) -> str:
                 return "\u274c X/Twitter couldn't load this tweet \u2014 cookies may be expired. Re-export and set COOKIES_TWITTER_BASE64"
             return "\u274c X/Twitter requires login for this content. Set COOKIES_TWITTER_BASE64 env var in Railway"
         if platform == "youtube":
-            has_cookies = get_cookie_path("youtube") is not None
-            if has_cookies:
-                return "\u274c YouTube requires login for this content \u2014 cookies may be expired. Re-export and set COOKIES_YOUTUBE_BASE64"
-            return "\u274c YouTube requires login for this content. Set COOKIES_YOUTUBE_BASE64 env var in Railway"
+            return "\u274c YouTube: login required or content unavailable"
         return f"\u274c Login required \u2014 set COOKIES_{platform.upper()}_BASE64 in Railway"
     if "copyright" in e:
         return "\u274c Blocked due to copyright"
@@ -816,6 +836,9 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
     temp_path = str(output_dir / "temp.%(ext)s")
     final_path = str(output_dir / "video.mp4")
     thumb_path = str(output_dir / "thumb.jpg")
+
+    if platform == "youtube":
+        return await _youtube_download(url, output_dir)
 
     if platform == "twitter":
         try:
@@ -882,21 +905,6 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
         ])
     elif platform == "instagram":
         cmd.extend(["-f", "best[vcodec^=avc1]/best"])
-    elif platform == "youtube":
-        cmd.extend(["-f",
-            "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
-            "/bestvideo[height<=720]+bestaudio"
-            "/best[height<=720][ext=mp4]"
-            "/best[height<=720]"
-            "/best"])
-        cmd.extend(["--merge-output-format", "mp4"])
-        cmd.extend(["--extractor-args", "youtube:player_client=web_creator,android,web;player_skip=webpage"])
-        cmd.extend([
-            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "--add-header", "Accept-Language:en-US,en;q=0.9",
-            "--add-header", "Sec-Fetch-Mode:navigate",
-        ])
     else:
         cmd.extend(["-f", "bv*+ba/b"])
 
@@ -923,12 +931,6 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
                 api_result = await _tiktok_api_download(url, output_dir)
                 if api_result:
                     return api_result
-
-            if platform == "youtube":
-                output_dir.mkdir(exist_ok=True)
-                yt_result = await _youtube_retry_download(url, output_dir)
-                if yt_result:
-                    return yt_result
 
             shutil.rmtree(output_dir, ignore_errors=True)
             return None, _parse_error(error_msg, platform)
