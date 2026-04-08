@@ -694,6 +694,9 @@ async def _youtube_retry_download(url: str, output_dir: Path) -> Optional[Tuple[
                 "-f", "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]/best",
                 "--merge-output-format", "mp4",
                 "--extractor-args", f"youtube:player_client={client}",
+                "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "--add-header", "Accept-Language:en-US,en;q=0.9",
+                "--add-header", "Sec-Fetch-Mode:navigate",
                 url,
             ]
             cookie_path = get_cookie_path("youtube")
@@ -888,6 +891,12 @@ async def download_media(url: str) -> Tuple[Optional[MediaInfo], Optional[str]]:
             "/best"])
         cmd.extend(["--merge-output-format", "mp4"])
         cmd.extend(["--extractor-args", "youtube:player_client=web_creator,android,web;player_skip=webpage"])
+        cmd.extend([
+            "--add-header", "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "--add-header", "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "--add-header", "Accept-Language:en-US,en;q=0.9",
+            "--add-header", "Sec-Fetch-Mode:navigate",
+        ])
     else:
         cmd.extend(["-f", "bv*+ba/b"])
 
