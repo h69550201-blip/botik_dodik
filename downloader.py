@@ -695,13 +695,6 @@ _YT_BROWSER_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
 }
 
-_YT_EXTRACTOR_ARGS = {
-    "youtube": {
-        "player_client": ["web_creator", "android", "web"],
-        "player_skip": ["webpage"],
-    }
-}
-
 
 def _yt_opts(out_path: str) -> dict:
     return {
@@ -719,7 +712,6 @@ def _yt_opts(out_path: str) -> dict:
         "socket_timeout": 30,
         "noplaylist": True,
         "http_headers": _YT_BROWSER_HEADERS,
-        "extractor_args": _YT_EXTRACTOR_ARGS,
     }
 
 
@@ -728,10 +720,8 @@ async def _youtube_download(url: str, output_dir: Path) -> Tuple[Optional[MediaI
 
     strategies = [_yt_opts(out_path)]
     fb1 = _yt_opts(out_path)
-    fb1["extractor_args"] = {"youtube": {"player_client": ["android_vr"]}}
-    fb2 = _yt_opts(out_path)
-    fb2["extractor_args"] = {"youtube": {"player_client": ["tv_embedded"]}}
-    strategies += [fb1, fb2]
+    fb1["extractor_args"] = {"youtube": {"player_client": ["mediaconnect"]}}
+    strategies += [fb1]
 
     info = None
     last_error = None
